@@ -6,31 +6,24 @@ from datetime import datetime
 
 st.set_page_config(page_title="Football Quant Pro", layout="wide")
 
-# ======================
-# CONFIG API
-# ======================
 API_KEY = st.secrets["API_KEY"]
 BASE_URL = "https://v3.football.api-sports.io"
 headers = {"x-apisports-key": API_KEY}
 season = datetime.now().year
 
 # ======================
-# API CALL
+# API
 # ======================
 @st.cache_data(ttl=600)
 def api_get(endpoint, params=None):
     try:
-        url = f"{BASE_URL}/{endpoint}"
-        r = requests.get(url, headers=headers, params=params)
+        r = requests.get(f"{BASE_URL}/{endpoint}", headers=headers, params=params)
         if r.status_code != 200:
             return None
         return r.json()
     except:
         return None
 
-# ======================
-# DATA FUNCTIONS
-# ======================
 @st.cache_data(ttl=3600)
 def get_countries():
     data = api_get("countries")
@@ -53,7 +46,7 @@ def get_stats(team_id, league_id):
     return data["response"] if data else None
 
 @st.cache_data(ttl=600)
-def get_fixture_and_odds(home_id, away_id):
+def get_odds(home_id, away_id):
 
     fixtures = api_get("fixtures", {
         "home": home_id,
@@ -73,27 +66,16 @@ def get_fixture_and_odds(home_id, away_id):
 
     odds = {}
 
-    # Tomamos el primer bookmaker disponible
-    bookmakers = odds_data["response"][0]["bookmakers"]
-
-    for bookmaker in bookmakers:
+    for bookmaker in odds_data["response"][0]["bookmakers"]:
         for bet in bookmaker["bets"]:
 
             if bet["name"] == "Match Winner":
                 for v in bet["values"]:
-                    if v["value"] == "Home":
-                        odds["Home"] = float(v["odd"])
-                    if v["value"] == "Draw":
-                        odds["Draw"] = float(v["odd"])
-                    if v["value"] == "Away":
-                        odds["Away"] = float(v["odd"])
+                    odds[v["value"]] = float(v["odd"])
 
             if bet["name"] == "Goals Over/Under":
                 for v in bet["values"]:
-                    if v["value"] == "Over 2.5":
-                        odds["Over 2.5"] = float(v["odd"])
-                    if v["value"] == "Under 2.5":
-                        odds["Under 2.5"] = float(v["odd"])
+                    odds[v["value"]] = float(v["odd"])
 
             if bet["name"] == "Both Teams Score":
                 for v in bet["values"]:
@@ -114,8 +96,7 @@ def value(prob, odd):
 # ======================
 # UI
 # ======================
-
-st.title("⚽ Football Quant Pro - Smart Value Scanner")
+st.title("⚽ Football Quant Pro - Hybrid Value Engine")
 
 countries = get_countries()
 country = st.selectbox("País", countries)
@@ -132,7 +113,7 @@ with col1:
 with col2:
     away = st.selectbox("Visitante", list(teams.keys()))
 
-analyze = st.button("🔎 Analizar con Cuotas Automáticas")
+analyze = st.button("🔎 Analizar Partido")
 
 # ======================
 # ANALYSIS
@@ -175,30 +156,52 @@ if analyze:
 
     under25 = 1 - over25
 
-    odds = get_fixture_and_odds(home_id, away_id)
+    # ======================
+    # OBTENER CUOTAS
+    # ======================
+    odds = get_odds(home_id, away_id)
 
-    if not odds:
-        st.warning("No se encontraron cuotas automáticas para este partido.")
-        st.stop()
+    if odds:
+        st.success("✅ Cuotas automáticas encontradas")
+    else:
+        st.warning("⚠ No se encontraron cuotas automáticas. Ingrese manualmente.")
+        odds = {}
+
+    # ======================
+    # INPUT MANUAL SI NECESARIO
+    # ======================
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        odds["Home"] = odds.get("Home") or st.number_input("Cuota Local", 1.01, 20.0, 2.0)
+        odds["Over 2.5"] = odds.get("Over 2.5") or st.number_input("Cuota Over 2.5", 1.01, 20.0, 1.9)
+
+    with col2:
+        odds["Draw"] = odds.get("Draw") or st.number_input("Cuota Empate", 1.01, 20.0, 3.0)
+        odds["Under 2.5"] = odds.get("Under 2.5") or st.number_input("Cuota Under 2.5", 1.01, 20.0, 1.9)
+
+    with col3:
+        odds["Away"] = odds.get("Away") or st.number_input("Cuota Visitante", 1.01, 20.0, 3.0)
+        odds["BTTS Yes"] = odds.get("BTTS Yes") or st.number_input("Cuota BTTS Sí", 1.01, 20.0, 1.8)
+
+    # ======================
+    # VALUE ENGINE
+    # ======================
+    st.subheader("📊 Value Detection Engine")
 
     markets = {
-        "Home": (home_win, odds.get("Home")),
-        "Draw": (draw, odds.get("Draw")),
-        "Away": (away_win, odds.get("Away")),
-        "Over 2.5": (over25, odds.get("Over 2.5")),
-        "Under 2.5": (under25, odds.get("Under 2.5")),
-        "BTTS Yes": (btts, odds.get("BTTS Yes"))
+        "Home": (home_win, odds["Home"]),
+        "Draw": (draw, odds["Draw"]),
+        "Away": (away_win, odds["Away"]),
+        "Over 2.5": (over25, odds["Over 2.5"]),
+        "Under 2.5": (under25, odds["Under 2.5"]),
+        "BTTS Yes": (btts, odds["BTTS Yes"])
     }
-
-    st.subheader("📊 Value Detection Engine")
 
     best_market = None
     best_value = -999
 
     for name,(prob,odd) in markets.items():
-
-        if not odd:
-            continue
 
         val = value(prob,odd)
         pct = round(prob*100,2)
