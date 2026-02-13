@@ -1,212 +1,198 @@
 import streamlit as st
 import requests
 import numpy as np
-import pandas as pd
-from datetime import datetime
 import math
+from datetime import datetime
 
 st.set_page_config(page_title="Football Quant Pro", layout="wide")
 
-# ==============================
-# CONFIG API
-# ==============================
 API_KEY = st.secrets["API_KEY"]
 BASE_URL = "https://v3.football.api-sports.io"
-
-headers = {
-    "x-apisports-key": API_KEY
-}
-
+headers = {"x-apisports-key": API_KEY}
 season = datetime.now().year
 
 
-# ==============================
-# API CALL OPTIMIZADA
-# ==============================
+# ======================
+# API CALL
+# ======================
 @st.cache_data(ttl=600)
 def api_get(endpoint, params=None):
     url = f"{BASE_URL}/{endpoint}"
-    response = requests.get(url, headers=headers, params=params)
-
-    if response.status_code != 200:
-        return None, response.status_code
-
-    return response.json(), 200
+    r = requests.get(url, headers=headers, params=params)
+    if r.status_code != 200:
+        return None
+    return r.json()
 
 
-# ==============================
-# OBTENER PAISES
-# ==============================
+# ======================
+# DATA FUNCTIONS
+# ======================
 @st.cache_data(ttl=3600)
 def get_countries():
-    data, status = api_get("countries")
-    if status != 200:
-        return []
-    return sorted([c["name"] for c in data["response"]])
+    data = api_get("countries")
+    return sorted([c["name"] for c in data["response"]]) if data else []
 
 
-# ==============================
-# OBTENER LIGAS POR PAIS
-# ==============================
 @st.cache_data(ttl=3600)
 def get_leagues(country):
-    data, status = api_get("leagues", {"country": country, "season": season})
-    if status != 200:
-        return {}
-
-    leagues = {}
-    for l in data["response"]:
-        leagues[l["league"]["name"]] = l["league"]["id"]
-
-    return leagues
+    data = api_get("leagues", {"country": country, "season": season})
+    return {l["league"]["name"]: l["league"]["id"] for l in data["response"]} if data else {}
 
 
-# ==============================
-# OBTENER EQUIPOS
-# ==============================
 @st.cache_data(ttl=3600)
 def get_teams(league_id):
-    data, status = api_get("teams", {"league": league_id, "season": season})
-    if status != 200:
-        return {}
-
-    teams = {}
-    for t in data["response"]:
-        teams[t["team"]["name"]] = t["team"]["id"]
-
-    return teams
+    data = api_get("teams", {"league": league_id, "season": season})
+    return {t["team"]["name"]: t["team"]["id"] for t in data["response"]} if data else {}
 
 
-# ==============================
-# OBTENER ESTADISTICAS
-# ==============================
 @st.cache_data(ttl=600)
-def get_team_stats(team_id, league_id):
-    data, status = api_get(
-        "teams/statistics",
-        {"league": league_id, "season": season, "team": team_id}
-    )
-
-    if status != 200:
-        return None
-
-    return data["response"]
+def get_stats(team_id, league_id):
+    data = api_get("teams/statistics",
+                   {"league": league_id, "season": season, "team": team_id})
+    return data["response"] if data else None
 
 
-# ==============================
-# MODELO POISSON
-# ==============================
-def poisson_prob(lmbda, k):
-    return (math.exp(-lmbda) * (lmbda ** k)) / math.factorial(k)
+@st.cache_data(ttl=600)
+def get_fixture_and_odds(home_id, away_id):
+
+    fixtures = api_get("fixtures", {
+        "home": home_id,
+        "away": away_id,
+        "status": "NS"
+    })
+
+    if not fixtures or fixtures["results"] == 0:
+        return None, None
+
+    fixture_id = fixtures["response"][0]["fixture"]["id"]
+
+    odds_data = api_get("odds", {"fixture": fixture_id})
+
+    if not odds_data or odds_data["results"] == 0:
+        return None, None
+
+    bookmakers = odds_data["response"][0]["bookmakers"][0]["bets"]
+
+    odds = {}
+    for bet in bookmakers:
+        if bet["name"] == "Match Winner":
+            odds["Home"] = float(bet["values"][0]["odd"])
+            odds["Draw"] = float(bet["values"][1]["odd"])
+            odds["Away"] = float(bet["values"][2]["odd"])
+        if bet["name"] == "Goals Over/Under":
+            for value in bet["values"]:
+                if value["value"] == "Over 2.5":
+                    odds["Over 2.5"] = float(value["odd"])
+                if value["value"] == "Under 2.5":
+                    odds["Under 2.5"] = float(value["odd"])
+        if bet["name"] == "Both Teams Score":
+            odds["BTTS Yes"] = float(bet["values"][0]["odd"])
+
+    return fixture_id, odds
 
 
-# ==============================
-# DIXON COLES
-# ==============================
-def dixon_coles_adjustment(x, y, lambda_home, lambda_away, rho=0.1):
-    if x == 0 and y == 0:
-        return 1 - (lambda_home * lambda_away * rho)
-    elif x == 0 and y == 1:
-        return 1 + (lambda_home * rho)
-    elif x == 1 and y == 0:
-        return 1 + (lambda_away * rho)
-    elif x == 1 and y == 1:
-        return 1 - rho
-    else:
-        return 1
+# ======================
+# MODEL
+# ======================
+def poisson(lmbda, k):
+    return (math.exp(-lmbda) * (lmbda**k)) / math.factorial(k)
 
 
-# ==============================
+def value(prob, odd):
+    return (prob * odd) - 1
+
+
+# ======================
 # UI
-# ==============================
-
-st.title("⚽ Football Quant Pro - Modelo Profesional")
+# ======================
+st.title("⚽ Football Quant Pro - Smart Value Scanner")
 
 countries = get_countries()
-selected_country = st.selectbox("Selecciona País", countries)
+country = st.selectbox("País", countries)
 
-if selected_country:
+leagues = get_leagues(country)
+league = st.selectbox("Liga", list(leagues.keys()))
 
-    leagues = get_leagues(selected_country)
-    selected_league = st.selectbox("Selecciona Liga", list(leagues.keys()))
+league_id = leagues.get(league)
+teams = get_teams(league_id)
 
-    if selected_league:
+col1, col2 = st.columns(2)
+with col1:
+    home = st.selectbox("Local", list(teams.keys()))
+with col2:
+    away = st.selectbox("Visitante", list(teams.keys()))
 
-        league_id = leagues.get(selected_league)
+analyze = st.button("🔎 Analizar con Cuotas Automáticas")
 
-        teams = get_teams(league_id)
-        col1, col2 = st.columns(2)
+# ======================
+# ANALYSIS
+# ======================
+if analyze:
 
-        with col1:
-            home_team = st.selectbox("Equipo Local", list(teams.keys()))
+    home_id = teams[home]
+    away_id = teams[away]
 
-        with col2:
-            away_team = st.selectbox("Equipo Visitante", list(teams.keys()))
+    home_stats = get_stats(home_id, league_id)
+    away_stats = get_stats(away_id, league_id)
 
-        analyze = st.button("🔎 Analizar Partido")
+    if not home_stats or not away_stats:
+        st.error("No stats disponibles")
+        st.stop()
 
-        if analyze:
+    lambda_home = home_stats["goals"]["for"]["total"]["home"] / max(home_stats["fixtures"]["played"]["home"],1)
+    lambda_away = away_stats["goals"]["for"]["total"]["away"] / max(away_stats["fixtures"]["played"]["away"],1)
 
-            home_id = teams.get(home_team)
-            away_id = teams.get(away_team)
+    max_goals = 6
+    matrix = np.zeros((max_goals,max_goals))
 
-            home_stats = get_team_stats(home_id, league_id)
-            away_stats = get_team_stats(away_id, league_id)
+    for i in range(max_goals):
+        for j in range(max_goals):
+            matrix[i,j]=poisson(lambda_home,i)*poisson(lambda_away,j)
 
-            if not home_stats or not away_stats:
-                st.error("Error obteniendo estadísticas. Revisa límite API.")
-                st.stop()
+    home_win=np.sum(np.tril(matrix,-1))
+    draw=np.sum(np.diag(matrix))
+    away_win=np.sum(np.triu(matrix,1))
+    over25=np.sum(matrix[i,j] for i in range(max_goals) for j in range(max_goals) if i+j>2)
+    btts=np.sum(matrix[i,j] for i in range(1,max_goals) for j in range(1,max_goals))
 
-            # ======================
-            # EXTRACCION GOLES
-            # ======================
-            home_goals_for = home_stats["goals"]["for"]["total"]["home"]
-            home_goals_against = home_stats["goals"]["against"]["total"]["home"]
+    fixture_id, odds = get_fixture_and_odds(home_id, away_id)
 
-            away_goals_for = away_stats["goals"]["for"]["total"]["away"]
-            away_goals_against = away_stats["goals"]["against"]["total"]["away"]
+    if not odds:
+        st.warning("No se encontraron cuotas automáticas para este partido.")
+        st.stop()
 
-            home_games = home_stats["fixtures"]["played"]["home"]
-            away_games = away_stats["fixtures"]["played"]["away"]
+    markets = {
+        "Home": (home_win, odds.get("Home")),
+        "Draw": (draw, odds.get("Draw")),
+        "Away": (away_win, odds.get("Away")),
+        "Over 2.5": (over25, odds.get("Over 2.5")),
+        "Under 2.5": (1-over25, odds.get("Under 2.5")),
+        "BTTS Yes": (btts, odds.get("BTTS Yes"))
+    }
 
-            lambda_home = home_goals_for / max(home_games, 1)
-            lambda_away = away_goals_for / max(away_games, 1)
+    st.subheader("📊 Value Detection Engine")
 
-            # ======================
-            # CALCULO MATRIZ
-            # ======================
-            max_goals = 5
-            matrix = np.zeros((max_goals, max_goals))
+    best_market = None
+    best_value = -999
 
-            for i in range(max_goals):
-                for j in range(max_goals):
-                    p = poisson_prob(lambda_home, i) * poisson_prob(lambda_away, j)
-                    p *= dixon_coles_adjustment(i, j, lambda_home, lambda_away)
-                    matrix[i, j] = p
+    for name,(prob,odd) in markets.items():
 
-            home_win = np.sum(np.tril(matrix, -1))
-            draw = np.sum(np.diag(matrix))
-            away_win = np.sum(np.triu(matrix, 1))
+        if not odd:
+            continue
 
-            home_pct = round(home_win * 100, 2)
-            draw_pct = round(draw * 100, 2)
-            away_pct = round(away_win * 100, 2)
+        val = value(prob,odd)
+        pct = round(prob*100,2)
+        fair = round(1/prob,2) if prob>0 else 0
 
-            # ======================
-            # RESULTADOS
-            # ======================
-            st.subheader("📊 Probabilidades Modelo (%)")
+        if val > best_value:
+            best_value = val
+            best_market = name
 
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Local", f"{home_pct}%")
-            col2.metric("Empate", f"{draw_pct}%")
-            col3.metric("Visitante", f"{away_pct}%")
+        emoji = "🟢" if val>0 else "🔴"
 
-            st.subheader("💰 Cuota Justa")
+        st.write(f"{emoji} **{name}** → {pct}% | Casa: {odd} | Justa: {fair} | Value: {round(val,3)}")
 
-            if home_win > 0:
-                st.write("Local:", round(1 / home_win, 2))
-            if draw > 0:
-                st.write("Empate:", round(1 / draw, 2))
-            if away_win > 0:
-                st.write("Visitante:", round(1 / away_win, 2))
+    if best_value > 0:
+        st.success(f"⭐ MEJOR VALUE BET: {best_market} (EV={round(best_value,3)})")
+    else:
+        st.warning("No hay Value Bet positivo en este partido.")
