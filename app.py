@@ -6,23 +6,27 @@ from datetime import datetime
 
 st.set_page_config(page_title="Football Quant Pro", layout="wide")
 
+# ======================
+# CONFIG API
+# ======================
 API_KEY = st.secrets["API_KEY"]
 BASE_URL = "https://v3.football.api-sports.io"
 headers = {"x-apisports-key": API_KEY}
 season = datetime.now().year
-
 
 # ======================
 # API CALL
 # ======================
 @st.cache_data(ttl=600)
 def api_get(endpoint, params=None):
-    url = f"{BASE_URL}/{endpoint}"
-    r = requests.get(url, headers=headers, params=params)
-    if r.status_code != 200:
+    try:
+        url = f"{BASE_URL}/{endpoint}"
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except:
         return None
-    return r.json()
-
 
 # ======================
 # DATA FUNCTIONS
@@ -32,25 +36,21 @@ def get_countries():
     data = api_get("countries")
     return sorted([c["name"] for c in data["response"]]) if data else []
 
-
 @st.cache_data(ttl=3600)
 def get_leagues(country):
     data = api_get("leagues", {"country": country, "season": season})
     return {l["league"]["name"]: l["league"]["id"] for l in data["response"]} if data else {}
-
 
 @st.cache_data(ttl=3600)
 def get_teams(league_id):
     data = api_get("teams", {"league": league_id, "season": season})
     return {t["team"]["name"]: t["team"]["id"] for t in data["response"]} if data else {}
 
-
 @st.cache_data(ttl=600)
 def get_stats(team_id, league_id):
     data = api_get("teams/statistics",
                    {"league": league_id, "season": season, "team": team_id})
     return data["response"] if data else None
-
 
 @st.cache_data(ttl=600)
 def get_fixture_and_odds(home_id, away_id):
@@ -62,34 +62,45 @@ def get_fixture_and_odds(home_id, away_id):
     })
 
     if not fixtures or fixtures["results"] == 0:
-        return None, None
+        return None
 
     fixture_id = fixtures["response"][0]["fixture"]["id"]
 
     odds_data = api_get("odds", {"fixture": fixture_id})
 
     if not odds_data or odds_data["results"] == 0:
-        return None, None
-
-    bookmakers = odds_data["response"][0]["bookmakers"][0]["bets"]
+        return None
 
     odds = {}
-    for bet in bookmakers:
-        if bet["name"] == "Match Winner":
-            odds["Home"] = float(bet["values"][0]["odd"])
-            odds["Draw"] = float(bet["values"][1]["odd"])
-            odds["Away"] = float(bet["values"][2]["odd"])
-        if bet["name"] == "Goals Over/Under":
-            for value in bet["values"]:
-                if value["value"] == "Over 2.5":
-                    odds["Over 2.5"] = float(value["odd"])
-                if value["value"] == "Under 2.5":
-                    odds["Under 2.5"] = float(value["odd"])
-        if bet["name"] == "Both Teams Score":
-            odds["BTTS Yes"] = float(bet["values"][0]["odd"])
 
-    return fixture_id, odds
+    # Tomamos el primer bookmaker disponible
+    bookmakers = odds_data["response"][0]["bookmakers"]
 
+    for bookmaker in bookmakers:
+        for bet in bookmaker["bets"]:
+
+            if bet["name"] == "Match Winner":
+                for v in bet["values"]:
+                    if v["value"] == "Home":
+                        odds["Home"] = float(v["odd"])
+                    if v["value"] == "Draw":
+                        odds["Draw"] = float(v["odd"])
+                    if v["value"] == "Away":
+                        odds["Away"] = float(v["odd"])
+
+            if bet["name"] == "Goals Over/Under":
+                for v in bet["values"]:
+                    if v["value"] == "Over 2.5":
+                        odds["Over 2.5"] = float(v["odd"])
+                    if v["value"] == "Under 2.5":
+                        odds["Under 2.5"] = float(v["odd"])
+
+            if bet["name"] == "Both Teams Score":
+                for v in bet["values"]:
+                    if v["value"] == "Yes":
+                        odds["BTTS Yes"] = float(v["odd"])
+
+    return odds if odds else None
 
 # ======================
 # MODEL
@@ -97,14 +108,13 @@ def get_fixture_and_odds(home_id, away_id):
 def poisson(lmbda, k):
     return (math.exp(-lmbda) * (lmbda**k)) / math.factorial(k)
 
-
 def value(prob, odd):
     return (prob * odd) - 1
-
 
 # ======================
 # UI
 # ======================
+
 st.title("⚽ Football Quant Pro - Smart Value Scanner")
 
 countries = get_countries()
@@ -136,7 +146,7 @@ if analyze:
     away_stats = get_stats(away_id, league_id)
 
     if not home_stats or not away_stats:
-        st.error("No stats disponibles")
+        st.error("No se pudieron obtener estadísticas.")
         st.stop()
 
     lambda_home = home_stats["goals"]["for"]["total"]["home"] / max(home_stats["fixtures"]["played"]["home"],1)
@@ -147,15 +157,25 @@ if analyze:
 
     for i in range(max_goals):
         for j in range(max_goals):
-            matrix[i,j]=poisson(lambda_home,i)*poisson(lambda_away,j)
+            matrix[i,j] = poisson(lambda_home,i) * poisson(lambda_away,j)
 
-    home_win=np.sum(np.tril(matrix,-1))
-    draw=np.sum(np.diag(matrix))
-    away_win=np.sum(np.triu(matrix,1))
-    over25=np.sum(matrix[i,j] for i in range(max_goals) for j in range(max_goals) if i+j>2)
-    btts=np.sum(matrix[i,j] for i in range(1,max_goals) for j in range(1,max_goals))
+    home_win = np.sum(np.tril(matrix,-1))
+    draw = np.sum(np.diag(matrix))
+    away_win = np.sum(np.triu(matrix,1))
 
-    fixture_id, odds = get_fixture_and_odds(home_id, away_id)
+    over25 = 0
+    btts = 0
+
+    for i in range(max_goals):
+        for j in range(max_goals):
+            if i + j > 2:
+                over25 += matrix[i,j]
+            if i > 0 and j > 0:
+                btts += matrix[i,j]
+
+    under25 = 1 - over25
+
+    odds = get_fixture_and_odds(home_id, away_id)
 
     if not odds:
         st.warning("No se encontraron cuotas automáticas para este partido.")
@@ -166,7 +186,7 @@ if analyze:
         "Draw": (draw, odds.get("Draw")),
         "Away": (away_win, odds.get("Away")),
         "Over 2.5": (over25, odds.get("Over 2.5")),
-        "Under 2.5": (1-over25, odds.get("Under 2.5")),
+        "Under 2.5": (under25, odds.get("Under 2.5")),
         "BTTS Yes": (btts, odds.get("BTTS Yes"))
     }
 
@@ -190,7 +210,11 @@ if analyze:
 
         emoji = "🟢" if val>0 else "🔴"
 
-        st.write(f"{emoji} **{name}** → {pct}% | Casa: {odd} | Justa: {fair} | Value: {round(val,3)}")
+        st.write(
+            f"{emoji} **{name}** → "
+            f"{pct}% | Casa: {odd} | Justa: {fair} | "
+            f"Value: {round(val,3)}"
+        )
 
     if best_value > 0:
         st.success(f"⭐ MEJOR VALUE BET: {best_market} (EV={round(best_value,3)})")
