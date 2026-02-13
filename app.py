@@ -4,8 +4,11 @@ import requests
 from scipy.stats import poisson
 
 # =============================
-# CONFIG API
+# CONFIG
 # =============================
+
+st.set_page_config(layout="wide")
+st.title("⚽ Football Quant PRO")
 
 API_KEY = st.secrets["API_FOOTBALL_KEY"]
 BASE_URL = "https://v3.football.api-sports.io"
@@ -15,10 +18,10 @@ HEADERS = {
 }
 
 # =============================
-# FUNCIONES API
+# API FUNCTIONS (CACHED)
 # =============================
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def get_countries():
     url = f"{BASE_URL}/countries"
     r = requests.get(url, headers=HEADERS).json()
@@ -26,7 +29,7 @@ def get_countries():
     return sorted(list(set(countries)))
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def get_leagues_by_country(country):
     url = f"{BASE_URL}/leagues?country={country}&season=2024"
     r = requests.get(url, headers=HEADERS).json()
@@ -39,7 +42,7 @@ def get_leagues_by_country(country):
     return leagues
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def get_teams(league_id):
     url = f"{BASE_URL}/teams?league={league_id}&season=2024"
     r = requests.get(url, headers=HEADERS).json()
@@ -47,7 +50,6 @@ def get_teams(league_id):
 
 
 def get_team_stats(team_name, league_id):
-    # Buscar ID equipo
     url = f"{BASE_URL}/teams?search={team_name}"
     team_data = requests.get(url, headers=HEADERS).json()
     team_id = team_data["response"][0]["team"]["id"]
@@ -59,11 +61,14 @@ def get_team_stats(team_name, league_id):
     ga = stats["response"]["goals"]["against"]["total"]["total"]
     played = stats["response"]["fixtures"]["played"]["total"]
 
+    if played == 0:
+        return 1.2, 1.2  # fallback
+
     return gf/played, ga/played
 
 
 # =============================
-# MODELO DIXON COLES
+# MODELOS
 # =============================
 
 def tau(i, j, lambda_h, lambda_a, rho):
@@ -77,15 +82,6 @@ def tau(i, j, lambda_h, lambda_a, rho):
         return 1 - rho
     else:
         return 1
-
-
-def dixon_coles(lambda_h, lambda_a, rho=0.05, max_goals=6):
-    matrix = np.zeros((max_goals+1, max_goals+1))
-    for i in range(max_goals+1):
-        for j in range(max_goals+1):
-            base = poisson.pmf(i, lambda_h) * poisson.pmf(j, lambda_a)
-            matrix[i][j] = base * tau(i, j, lambda_h, lambda_a, rho)
-    return matrix
 
 
 def montecarlo(lambda_h, lambda_a, sims=20000):
@@ -111,23 +107,20 @@ def kelly(prob, odds):
 
 
 # =============================
-# INTERFAZ STREAMLIT
+# UI SELECTION
 # =============================
-
-st.set_page_config(layout="wide")
-st.title("⚽ Football Quant PRO - Selección por País")
 
 # 1️⃣ País
 countries = get_countries()
-selected_country = st.selectbox("Seleccionar País", countries)
+selected_country = st.selectbox("🌍 País", countries)
 
 # 2️⃣ Liga
 leagues = get_leagues_by_country(selected_country)
 
 if leagues:
-    league_names = [l["name"] for l in leagues]
-    selected_league = st.selectbox("Seleccionar Liga", league_names)
 
+    league_names = [l["name"] for l in leagues]
+    selected_league = st.selectbox("🏆 Liga", league_names)
     league_id = next(l["id"] for l in leagues if l["name"] == selected_league)
 
     # 3️⃣ Equipos
@@ -141,9 +134,20 @@ if leagues:
     with col2:
         away_team = st.selectbox("Equipo Visitante", teams)
 
+    if home_team == away_team:
+        st.error("⚠ No puedes seleccionar el mismo equipo.")
+        st.stop()
+
     rho = st.slider("Rho Dixon-Coles", 0.0, 0.2, 0.05)
 
-    if st.button("Analizar Partido"):
+    # =============================
+    # SESSION STATE
+    # =============================
+
+    if "resultado" not in st.session_state:
+        st.session_state.resultado = None
+
+    if st.button("🔎 Analizar Partido"):
 
         home_attack, home_defense = get_team_stats(home_team, league_id)
         away_attack, away_defense = get_team_stats(away_team, league_id)
@@ -153,10 +157,17 @@ if leagues:
         lambda_h = (home_attack * away_defense) / league_avg
         lambda_a = (away_attack * home_defense) / league_avg
 
-        mc = montecarlo(lambda_h, lambda_a)
-        mc_home, mc_draw, mc_away, mc_over25, mc_btts = mc
+        st.session_state.resultado = montecarlo(lambda_h, lambda_a)
 
-        st.subheader("📊 Probabilidades")
+    # =============================
+    # MOSTRAR RESULTADOS
+    # =============================
+
+    if st.session_state.resultado:
+
+        mc_home, mc_draw, mc_away, mc_over25, mc_btts = st.session_state.resultado
+
+        st.subheader("📊 Probabilidades (Monte Carlo 20K)")
 
         st.write({
             "Local": round(mc_home,3),
@@ -166,10 +177,10 @@ if leagues:
             "BTTS": round(mc_btts,3)
         })
 
-        st.subheader("💰 Value y Kelly")
+        st.subheader("💰 Evaluación de Valor")
 
-        odds_home = st.number_input("Cuota Local", 1.0, 20.0, 2.0)
-        odds_over = st.number_input("Cuota Over 2.5", 1.0, 20.0, 1.9)
+        odds_home = st.number_input("Cuota Local", 1.0, 20.0, 2.0, key="odds1")
+        odds_over = st.number_input("Cuota Over 2.5", 1.0, 20.0, 1.9, key="odds2")
 
         st.write({
             "Value Local": round(value(mc_home, odds_home),3),
@@ -177,5 +188,12 @@ if leagues:
             "Value Over 2.5": round(value(mc_over25, odds_over),3),
             "Kelly Over 2.5": round(kelly(mc_over25, odds_over),3)
         })
+
+        if value(mc_home, odds_home) > 0:
+            st.success("🔥 Local tiene Value")
+
+        if value(mc_over25, odds_over) > 0:
+            st.success("🔥 Over 2.5 tiene Value")
+
 else:
     st.warning("No hay ligas disponibles para este país.")
