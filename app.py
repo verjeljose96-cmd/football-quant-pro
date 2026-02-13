@@ -3,7 +3,7 @@ import requests
 import numpy as np
 
 # =====================================
-# CONFIGURACIÓN
+# CONFIG
 # =====================================
 
 st.set_page_config(page_title="Football Quant Pro ⚽", layout="wide")
@@ -15,47 +15,55 @@ headers = {
     "x-apisports-key": API_KEY
 }
 
-st.title("⚽ Football Quant Pro - Modelo Cuantitativo")
+st.title("⚽ Football Quant Pro")
 
 # =====================================
-# FUNCIONES API
+# FUNCIONES SEGURAS
 # =====================================
+
+def safe_request(url):
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except:
+        return None
+
 
 def get_countries():
-    url = f"{BASE_URL}/countries"
-    response = requests.get(url, headers=headers)
-    data = response.json()
-    return sorted([c["name"] for c in data["response"]])
+    data = safe_request(f"{BASE_URL}/countries")
+    if data and "response" in data:
+        return sorted([c["name"] for c in data["response"]])
+    return []
 
 
 def get_leagues(country):
-    url = f"{BASE_URL}/leagues?country={country}&season=2024"
-    response = requests.get(url, headers=headers)
-    data = response.json()
-
+    data = safe_request(f"{BASE_URL}/leagues?country={country}&season=2024")
     leagues = {}
-    for league in data["response"]:
-        leagues[league["league"]["name"]] = league["league"]["id"]
+
+    if data and "response" in data:
+        for league in data["response"]:
+            leagues[league["league"]["name"]] = league["league"]["id"]
 
     return leagues
 
 
 def get_teams(league_id):
-    url = f"{BASE_URL}/teams?league={league_id}&season=2024"
-    response = requests.get(url, headers=headers)
-    data = response.json()
-
-    return [team["team"]["name"] for team in data["response"]]
+    data = safe_request(f"{BASE_URL}/teams?league={league_id}&season=2024")
+    if data and "response" in data:
+        return [team["team"]["name"] for team in data["response"]]
+    return []
 
 
 def get_team_stats(team_name, league_id):
 
-    url = f"{BASE_URL}/teams?league={league_id}&season=2024"
-    response = requests.get(url, headers=headers)
-    data = response.json()
+    data = safe_request(f"{BASE_URL}/teams?league={league_id}&season=2024")
+
+    if not data or "response" not in data:
+        return 1.2, 1.2
 
     team_id = None
-
     for team in data["response"]:
         if team["team"]["name"] == team_name:
             team_id = team["team"]["id"]
@@ -64,9 +72,14 @@ def get_team_stats(team_name, league_id):
     if team_id is None:
         return 1.2, 1.2
 
-    url_stats = f"{BASE_URL}/teams/statistics?league={league_id}&season=2024&team={team_id}"
-    response_stats = requests.get(url_stats, headers=headers)
-    stats = response_stats.json()["response"]
+    stats_data = safe_request(
+        f"{BASE_URL}/teams/statistics?league={league_id}&season=2024&team={team_id}"
+    )
+
+    if not stats_data or "response" not in stats_data:
+        return 1.2, 1.2
+
+    stats = stats_data["response"]
 
     goals_for = stats["goals"]["for"]["total"]["home"]
     goals_against = stats["goals"]["against"]["total"]["home"]
@@ -86,43 +99,54 @@ def montecarlo(lambda_h, lambda_a, sims=10000):
     home_goals = np.random.poisson(lambda_h, sims)
     away_goals = np.random.poisson(lambda_a, sims)
 
-    home_win = np.mean(home_goals > away_goals)
-    draw = np.mean(home_goals == away_goals)
-    away_win = np.mean(home_goals < away_goals)
-    over25 = np.mean((home_goals + away_goals) > 2.5)
-    btts = np.mean((home_goals > 0) & (away_goals > 0))
+    return (
+        np.mean(home_goals > away_goals),
+        np.mean(home_goals == away_goals),
+        np.mean(home_goals < away_goals),
+        np.mean((home_goals + away_goals) > 2.5),
+        np.mean((home_goals > 0) & (away_goals > 0))
+    )
 
-    return home_win, draw, away_win, over25, btts
+
+def fair_odds(prob):
+    return round(1 / prob, 2) if prob > 0 else 0
 
 
 def value(prob, odds):
-    return (prob * odds) - 1
+    return round((prob * odds) - 1, 3)
 
 
 def kelly(prob, odds):
     k = ((prob * (odds - 1)) - (1 - prob)) / (odds - 1)
-    return max(k, 0)
-
-
-def fair_odds(prob):
-    if prob == 0:
-        return 0
-    return 1 / prob
+    return round(max(k, 0), 3)
 
 
 # =====================================
-# SELECTORES
+# INTERFAZ
 # =====================================
 
 countries = get_countries()
+
+if not countries:
+    st.error("Error con API o límite alcanzado.")
+    st.stop()
+
 selected_country = st.selectbox("🌎 País", countries)
 
 leagues = get_leagues(selected_country)
-selected_league = st.selectbox("🏆 Liga", list(leagues.keys()))
 
-league_id = leagues[selected_league]
+if not leagues:
+    st.warning("Este país no tiene ligas disponibles 2024.")
+    st.stop()
+
+selected_league = st.selectbox("🏆 Liga", list(leagues.keys()))
+league_id = leagues.get(selected_league)
 
 teams = get_teams(league_id)
+
+if not teams:
+    st.warning("No se pudieron cargar equipos.")
+    st.stop()
 
 col1, col2 = st.columns(2)
 
@@ -140,10 +164,6 @@ with col2:
 if "resultado" not in st.session_state:
     st.session_state.resultado = None
 
-
-# =====================================
-# ANALIZAR
-# =====================================
 
 if st.button("🔎 Analizar"):
 
@@ -169,9 +189,9 @@ if st.session_state.resultado:
 
     mc_home, mc_draw, mc_away, mc_over25, mc_btts = st.session_state.resultado
 
-    st.subheader("📊 Probabilidades (%) y Cuota Justa")
+    st.subheader("📊 Probabilidades y Cuota Justa")
 
-    results = {
+    markets = {
         "Local": mc_home,
         "Empate": mc_draw,
         "Visitante": mc_away,
@@ -179,17 +199,18 @@ if st.session_state.resultado:
         "BTTS": mc_btts
     }
 
-    for name, prob in results.items():
+    for name, prob in markets.items():
         st.write(
-            f"{name}: {round(prob*100,2)}%  |  "
-            f"Cuota Justa: {round(fair_odds(prob),2)}"
+            f"{name} → "
+            f"{round(prob*100,2)}% | "
+            f"Cuota Justa: {fair_odds(prob)}"
         )
 
-    st.subheader("💰 Comparar contra Casa")
+    st.subheader("💰 Comparar con Casa")
 
     odds_home = st.number_input("Cuota Casa - Local", 1.0, 20.0, 2.0)
 
     st.write(
-        f"Value Local: {round(value(mc_home, odds_home),3)} | "
-        f"Kelly: {round(kelly(mc_home, odds_home),3)}"
-    )
+        f"Value: {value(mc_home, odds_home)} | "
+        f"Kelly: {kelly(mc_home, odds_home)}"
+        )
