@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import numpy as np
 import pandas as pd
-from math import exp, factorial
+from math import factorial
 from scipy.optimize import minimize
 
 st.set_page_config(layout="wide")
@@ -11,9 +11,9 @@ API_KEY = st.secrets["API_KEY"]
 BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
 
-# -------------------------------
-# API CALLS
-# -------------------------------
+# -----------------------------------
+# FUNCIONES API
+# -----------------------------------
 
 @st.cache_data(ttl=3600)
 def get_leagues(country):
@@ -33,17 +33,19 @@ def get_matches(league_id):
 
     rows = []
     for m in data:
-        rows.append({
-            "home": m["teams"]["home"]["name"],
-            "away": m["teams"]["away"]["name"],
-            "home_goals": m["goals"]["home"],
-            "away_goals": m["goals"]["away"]
-        })
+        if m["goals"]["home"] is not None and m["goals"]["away"] is not None:
+            rows.append({
+                "home": m["teams"]["home"]["name"],
+                "away": m["teams"]["away"]["name"],
+                "home_goals": m["goals"]["home"],
+                "away_goals": m["goals"]["away"]
+            })
+
     return pd.DataFrame(rows)
 
-# -------------------------------
-# DIXON COLES LIKELIHOOD
-# -------------------------------
+# -----------------------------------
+# MODELO DIXON COLES
+# -----------------------------------
 
 def poisson(lmbda, k):
     return (lmbda**k * np.exp(-lmbda)) / factorial(k)
@@ -63,9 +65,9 @@ def dc_adjustment(x, y, l1, l2, rho):
 
 
 def log_likelihood(params, df, teams):
-    n_teams = len(teams)
-    attack = params[:n_teams]
-    defense = params[n_teams:2*n_teams]
+    n = len(teams)
+    attack = params[:n]
+    defense = params[n:2*n]
     gamma = params[-2]
     rho = params[-1]
 
@@ -86,11 +88,11 @@ def log_likelihood(params, df, teams):
     return -ll
 
 
-# -------------------------------
-# APP
-# -------------------------------
+# -----------------------------------
+# UI
+# -----------------------------------
 
-st.title("Modelo Profesional Dixon-Coles MLE")
+st.title("Modelo Profesional Dixon-Coles (MLE Persistente)")
 
 country = st.text_input("País (ej: Colombia)")
 
@@ -99,22 +101,25 @@ if country:
     leagues = get_leagues(country)
     league_name = st.selectbox("Liga", list(leagues.keys()))
 
+    if "model_trained" not in st.session_state:
+        st.session_state.model_trained = False
+
     if st.button("Entrenar Modelo"):
 
         league_id = leagues[league_name]
         df = get_matches(league_id)
 
         teams = sorted(list(set(df["home"]).union(set(df["away"]))))
-        n_teams = len(teams)
+        n = len(teams)
 
         init_params = np.concatenate([
-            np.zeros(n_teams),   # ataque
-            np.zeros(n_teams),   # defensa
-            [0],                 # gamma
-            [0.1]                # rho
+            np.zeros(n),
+            np.zeros(n),
+            [0],
+            [0.1]
         ])
 
-        with st.spinner("Optimización en progreso..."):
+        with st.spinner("Entrenando modelo..."):
 
             result = minimize(
                 log_likelihood,
@@ -123,14 +128,26 @@ if country:
                 method="L-BFGS-B"
             )
 
-        params = result.x
+        st.session_state.attack = result.x[:n]
+        st.session_state.defense = result.x[n:2*n]
+        st.session_state.gamma = result.x[-2]
+        st.session_state.rho = result.x[-1]
+        st.session_state.teams = teams
+        st.session_state.model_trained = True
 
-        attack = params[:n_teams]
-        defense = params[n_teams:2*n_teams]
-        gamma = params[-2]
-        rho = params[-1]
+        st.success("Modelo entrenado y guardado en sesión")
 
-        st.success("Modelo entrenado correctamente")
+    # -----------------------------------
+    # SI EL MODELO YA ESTÁ ENTRENADO
+    # -----------------------------------
+
+    if st.session_state.model_trained:
+
+        teams = st.session_state.teams
+        attack = st.session_state.attack
+        defense = st.session_state.defense
+        gamma = st.session_state.gamma
+        rho = st.session_state.rho
 
         home_team = st.selectbox("Equipo Local", teams)
         away_team = st.selectbox("Equipo Visitante", teams)
@@ -156,6 +173,7 @@ if country:
             draw = np.sum(np.diag(matrix))
             away_win = np.sum(np.triu(matrix, 1))
 
+            st.subheader("Probabilidades")
             st.write(f"Local: {home_win*100:.2f}%")
             st.write(f"Empate: {draw*100:.2f}%")
             st.write(f"Visitante: {away_win*100:.2f}%")
